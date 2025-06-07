@@ -139,9 +139,12 @@ fn add_crc_and_len(bits: &[u8]) -> Vec<u8> {
 }
 
 fn check_crc_and_len(bits: &[u8]) -> Option<Vec<u8>> {
+    if bits.len() < 64 {
+        return None;
+    }
     let length = bits_to_int(&bits[..32]);
     let crc_expected = bits_to_int(&bits[32..64]);
-    if 64 + length > bits.len() {
+    if length > bits.len().saturating_sub(64) {
         return None;
     }
     let data = &bits[64..64 + length];
