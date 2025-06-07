@@ -58,6 +58,8 @@ cargo run --release --   extract   --stego stego.png   --output extracted_secret
  - `--progress` — show progress bar and estimated time
 
 When `--stealth high` is chosen, additional patch shuffling preserves image statistics while further confusing RS analysis.
+Masking is applied to the cover image prior to embedding so that the embedded
+bits remain intact during extraction.
 
 ---
 
