@@ -165,16 +165,31 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
     let mut bit_index = 0;
     let capacity = flat.len();
     let pb = if show_progress {
-        let bar = ProgressBar::new((bits.len() as u64).min((capacity / redundancy) as u64));
+        let bar = ProgressBar::new((bits.len() as u64).min((capacity / (2 * redundancy)) as u64));
         bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
         Some(bar)
     } else { None };
 
-    while bit_index < bits.len() && bit_index < capacity / redundancy {
+    while bit_index < bits.len() && bit_index < capacity / (2 * redundancy) {
         let pos = dist.sample(&mut rng) * 4;
         for i in 0..redundancy {
-            let idx = (pos + i) % capacity;
-            flat[idx] = (flat[idx] & 0xFE) | bits[bit_index];
+            let idx1 = (pos + i) % capacity;
+            let orig = flat[idx1];
+            let new_val = (orig & 0xFE) | bits[bit_index];
+            if orig == new_val { continue; }
+
+            let mut idx2 = (idx1 + 1) % capacity;
+            let mut steps = 0;
+            while steps < capacity && flat[idx2] != new_val {
+                idx2 = (idx2 + 1) % capacity;
+                steps += 1;
+            }
+            if steps < capacity && idx2 != idx1 {
+                flat[idx1] = new_val;
+                flat[idx2] = orig;
+            } else {
+                flat[idx1] = new_val;
+            }
         }
         bit_index += 1;
         if let Some(ref bar) = pb { bar.inc(1); }
