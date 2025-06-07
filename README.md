@@ -52,7 +52,7 @@ cargo run --release --   extract   --stego stego.png   --output extracted_secret
 ## 🧠 Advanced Options
 
 - `--redundancy 3` — set bit redundancy factor (default: 3)
-- `--domain lsb|dct` — select embedding domain
+- `--domain lsb|lsb-match|dct` — select embedding domain
 - `--stealth high|medium|low` — control aggressiveness of classifier masking
 - `--progress` — show progress bar and estimated time
 

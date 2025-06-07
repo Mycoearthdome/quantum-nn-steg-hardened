@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use image::{DynamicImage, GenericImageView, RgbaImage, Pixel, Luma};
+use image::{DynamicImage, GenericImageView, RgbaImage, Luma};
 use imageproc::gradients::sobel_gradient_map;
 use rand::{Rng, SeedableRng};
 use rand::distributions::{WeightedIndex, Distribution};
@@ -60,6 +60,7 @@ enum Commands {
 enum Domain {
     Lsb,
     Dct,
+    LsbMatch,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -183,6 +184,47 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
     rgba
 }
 
+fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
+    let mut rgba = img.to_rgba8();
+    let gray = img.to_luma8();
+    let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
+
+    let flat = rgba.as_flat_samples_mut().samples;
+    let mut weights: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let total_weight: f64 = weights.iter().sum();
+    weights.iter_mut().for_each(|w| *w /= total_weight);
+
+    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
+    let dist = WeightedIndex::new(&weights).unwrap();
+
+    let mut bit_index = 0;
+    let capacity = flat.len();
+    let pb = if show_progress {
+        let bar = ProgressBar::new((bits.len() as u64).min((capacity / redundancy) as u64));
+        bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
+        Some(bar)
+    } else { None };
+
+    while bit_index < bits.len() && bit_index < capacity / redundancy {
+        let pos = dist.sample(&mut rng) * 4;
+        for i in 0..redundancy {
+            let idx = (pos + i) % capacity;
+            let byte = &mut flat[idx];
+            let bit = bits[bit_index];
+            if (*byte & 1) != bit {
+                if *byte == 0 { *byte = 1; }
+                else if *byte == 255 { *byte = 254; }
+                else if rng.gen_bool(0.5) { *byte = byte.wrapping_add(1); } else { *byte = byte.wrapping_sub(1); }
+            }
+        }
+        bit_index += 1;
+        if let Some(ref bar) = pb { bar.inc(1); }
+    }
+
+    if let Some(bar) = pb { bar.finish_with_message("Embedding complete"); }
+    rgba
+}
+
 fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
     let rgba = img.to_rgba8();
     let flat = rgba.as_flat_samples().samples;
@@ -220,11 +262,11 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
 }
 
 // Simplified transform-domain embedding using DCT on 8x8 blocks
-fn dct_embed(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
+fn dct_embed(img: &DynamicImage, bits: &[u8], _password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
     use rustdct::{DctPlanner};
     let mut rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let planner = DctPlanner::new();
+    let mut planner = DctPlanner::new();
     let dct = planner.plan_dct2(8);
     let idct = planner.plan_dct3(8);
 
@@ -235,7 +277,6 @@ fn dct_embed(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize,
         Some(bar)
     } else { None };
 
-    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
     let mut bit_index = 0;
 
     for by in 0..height/8 {
@@ -315,11 +356,11 @@ fn dct_embed(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize,
     rgba
 }
 
-fn dct_extract(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
+fn dct_extract(img: &DynamicImage, bits_len: usize, _password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
     use rustdct::DctPlanner;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let planner = DctPlanner::new();
+    let mut planner = DctPlanner::new();
     let dct = planner.plan_dct2(8);
 
     let mut bits = Vec::with_capacity(bits_len);
@@ -364,20 +405,35 @@ fn dct_extract(img: &DynamicImage, bits_len: usize, password: &str, redundancy: 
     bits
 }
 
+fn mask_low(img: &mut RgbaImage, rng: &mut StdRng) {
+    for p in img.pixels_mut() {
+        let jitter: i16 = rng.gen_range(-1..=1);
+        p.0[0] = (p.0[0] as i16 + jitter).clamp(0, 255) as u8;
+        p.0[1] = (p.0[1] as i16 + jitter).clamp(0, 255) as u8;
+        p.0[2] = (p.0[2] as i16 + jitter).clamp(0, 255) as u8;
+    }
+}
+
+fn mask_medium(img: &mut RgbaImage, rng: &mut StdRng) {
+    mask_low(img, rng);
+    let blurred = image::imageops::blur(img, 0.5);
+    *img = blurred;
+}
+
+fn mask_high(img: &mut RgbaImage, rng: &mut StdRng) {
+    for _ in 0..2 {
+        mask_low(img, rng);
+        let blurred = image::imageops::blur(img, 1.0);
+        *img = blurred;
+    }
+}
+
 fn mask_image(img: &mut RgbaImage, level: StealthLevel, password: &str) {
     let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    let iter = match level {
-        StealthLevel::Low => 1,
-        StealthLevel::Medium => 2,
-        StealthLevel::High => 4,
-    };
-    for _ in 0..iter {
-        for p in img.pixels_mut() {
-            let jitter: i16 = rng.gen_range(-1..=1);
-            p.0[0] = (p.0[0] as i16 + jitter).clamp(0, 255) as u8;
-            p.0[1] = (p.0[1] as i16 + jitter).clamp(0, 255) as u8;
-            p.0[2] = (p.0[2] as i16 + jitter).clamp(0, 255) as u8;
-        }
+    match level {
+        StealthLevel::Low => mask_low(img, &mut rng),
+        StealthLevel::Medium => mask_medium(img, &mut rng),
+        StealthLevel::High => mask_high(img, &mut rng),
     }
 }
 
@@ -399,6 +455,7 @@ fn main() {
 
             let mut stego_img = match domain {
                 Domain::Lsb => adaptive_embed_lsb(&cover_img, &masked_bits, &password, redundancy, progress),
+                Domain::LsbMatch => adaptive_embed_lsb_match(&cover_img, &masked_bits, &password, redundancy, progress),
                 Domain::Dct => dct_embed(&cover_img, &masked_bits, &password, redundancy, progress),
             };
 
@@ -414,7 +471,7 @@ fn main() {
             }
             // We don't know length yet; we will extract as many bits as image capacity
             let capacity = match domain {
-                Domain::Lsb => stego_loaded.to_rgba8().as_flat_samples().samples.len() / redundancy,
+                Domain::Lsb | Domain::LsbMatch => stego_loaded.to_rgba8().as_flat_samples().samples.len() / redundancy,
                 Domain::Dct => {
                     let (w,h) = stego_loaded.dimensions();
                     ((w/8)*(h/8)) as usize
@@ -424,6 +481,7 @@ fn main() {
 
             let extracted_bits = match domain {
                 Domain::Lsb => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
+                Domain::LsbMatch => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
                 Domain::Dct => dct_extract(&stego_loaded, bits_len, &password, redundancy, progress),
             };
             let key = generate_bits_fast(bits_len, &password);
