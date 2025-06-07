@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use image::{DynamicImage, GenericImageView, RgbaImage, Luma, GrayImage};
 use imageproc::gradients::sobel_gradient_map;
 use rand::{Rng, SeedableRng};
+use rand::seq::SliceRandom;
 use rand::distributions::{WeightedIndex, Distribution};
 use rand::rngs::StdRng;
 use sha2::{Sha256, Sha512, Digest};
@@ -473,12 +474,45 @@ fn mask_medium(img: &mut RgbaImage, rng: &mut StdRng) {
     *img = blurred;
 }
 
+fn mask_rs_safe(img: &mut RgbaImage, rng: &mut StdRng) {
+    let (width, height) = img.dimensions();
+    let block = 4;
+    for by in (0..height).step_by(block as usize) {
+        for bx in (0..width).step_by(block as usize) {
+            let mut patch = Vec::new();
+            for y in 0..block {
+                for x in 0..block {
+                    let nx = bx + x;
+                    let ny = by + y;
+                    if nx < width && ny < height {
+                        patch.push(*img.get_pixel(nx, ny));
+                    }
+                }
+            }
+            patch.shuffle(rng);
+            let mut iter = patch.into_iter();
+            for y in 0..block {
+                for x in 0..block {
+                    let nx = bx + x;
+                    let ny = by + y;
+                    if nx < width && ny < height {
+                        if let Some(px) = iter.next() {
+                            img.put_pixel(nx, ny, px);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn mask_high(img: &mut RgbaImage, rng: &mut StdRng) {
     for _ in 0..2 {
         mask_low(img, rng);
         let blurred = image::imageops::blur(img, 1.0);
         *img = blurred;
     }
+    mask_rs_safe(img, rng);
 }
 
 fn mask_image(img: &mut RgbaImage, level: StealthLevel, password: &str) {

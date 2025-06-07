@@ -19,8 +19,8 @@ This system includes **five layers** of anti-detection defenses:
 4. **Transform-Domain Embedding (DCT)**  
    Optionally embeds payload into mid-band JPEG-DCT coefficients for added stealth.
 
-5. **Classifier-Resistant Statistical Masking**  
-   Uses RS-safe and visually invariant patch masking to reduce detectability by ML models.
+5. **Classifier-Resistant Statistical Masking**
+   RS-safe, patch-based shuffling is applied at high stealth level to preserve global statistics while disrupting local correlations.
 
 ---
 
@@ -55,7 +55,9 @@ cargo run --release --   extract   --stego stego.png   --output extracted_secret
 - `--redundancy 3` — set bit redundancy factor (default: 3)
 - `--domain lsb|lsb-match|dct` — select embedding domain
 - `--stealth high|medium|low` — control aggressiveness of classifier masking
-- `--progress` — show progress bar and estimated time
+ - `--progress` — show progress bar and estimated time
+
+When `--stealth high` is chosen, additional patch shuffling preserves image statistics while further confusing RS analysis.
 
 ---
 
