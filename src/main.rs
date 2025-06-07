@@ -417,7 +417,10 @@ fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundanc
             }
             let mut coeff = dct_2d(&block);
 
-            let mut val = block[4][3].round() as i32;
+            // embed the bit in a mid-band DCT coefficient rather than the
+            // spatial domain value. using the coefficient ensures symmetry with
+            // extraction and actually modifies the frequency component.
+            let mut val = coeff[4][3].round() as i32;
             let want = bit as i32;
             let parity = (val.abs() & 1) as i32;
             if parity != want {
