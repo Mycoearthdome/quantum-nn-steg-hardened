@@ -13,6 +13,7 @@ use crc32fast::Hasher as Crc32Hasher;
 use bzip2::read::{BzEncoder, BzDecoder};
 use bzip2::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -152,34 +153,33 @@ fn check_crc_and_len(bits: &[u8]) -> Option<Vec<u8>> {
 
 fn entropy_map(gray: &GrayImage, window: u32) -> Vec<f64> {
     let (w, h) = gray.dimensions();
-    let mut map = vec![0.0; (w * h) as usize];
     let radius = window / 2;
-    for y in 0..h {
-        for x in 0..w {
-            let mut hist = [0u32; 256];
-            let mut count = 0u32;
-            let x_start = x.saturating_sub(radius);
-            let y_start = y.saturating_sub(radius);
-            let x_end = (x + radius).min(w - 1);
-            let y_end = (y + radius).min(h - 1);
-            for yy in y_start..=y_end {
-                for xx in x_start..=x_end {
-                    let val = gray.get_pixel(xx, yy)[0] as usize;
-                    hist[val] += 1;
-                    count += 1;
-                }
+    let total = (w as usize) * (h as usize);
+    (0..total).into_par_iter().map(|i| {
+        let y = (i as u32) / w;
+        let x = (i as u32) % w;
+        let mut hist = [0u32; 256];
+        let mut count = 0u32;
+        let x_start = x.saturating_sub(radius);
+        let y_start = y.saturating_sub(radius);
+        let x_end = (x + radius).min(w - 1);
+        let y_end = (y + radius).min(h - 1);
+        for yy in y_start..=y_end {
+            for xx in x_start..=x_end {
+                let val = gray.get_pixel(xx, yy)[0] as usize;
+                hist[val] += 1;
+                count += 1;
             }
-            let mut entropy = 0.0;
-            for &freq in &hist {
-                if freq > 0 {
-                    let p = freq as f64 / count as f64;
-                    entropy -= p * p.log2();
-                }
-            }
-            map[(y * w + x) as usize] = entropy;
         }
-    }
-    map
+        let mut entropy = 0.0;
+        for &freq in &hist {
+            if freq > 0 {
+                let p = freq as f64 / count as f64;
+                entropy -= p * p.log2();
+            }
+        }
+        entropy
+    }).collect()
 }
 
 fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
