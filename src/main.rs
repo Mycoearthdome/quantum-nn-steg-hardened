@@ -2,18 +2,15 @@ use std::fs::File;
 use std::io::{Read, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use image::{DynamicImage, GenericImageView, RgbaImage, Luma, GrayImage};
-use imageproc::gradients::sobel_gradient_map;
+use image::{DynamicImage, GenericImageView, RgbaImage};
 use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
-use rand::distributions::{WeightedIndex, Distribution};
 use rand::rngs::StdRng;
 use sha2::{Sha256, Sha512, Digest};
 use crc32fast::Hasher as Crc32Hasher;
 use bzip2::read::{BzEncoder, BzDecoder};
 use bzip2::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -157,51 +154,14 @@ fn check_crc_and_len(bits: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn entropy_map(gray: &GrayImage, window: u32) -> Vec<f64> {
-    let (w, h) = gray.dimensions();
-    let radius = window / 2;
-    let total = (w as usize) * (h as usize);
-    (0..total).into_par_iter().map(|i| {
-        let y = (i as u32) / w;
-        let x = (i as u32) % w;
-        let mut hist = [0u32; 256];
-        let mut count = 0u32;
-        let x_start = x.saturating_sub(radius);
-        let y_start = y.saturating_sub(radius);
-        let x_end = (x + radius).min(w - 1);
-        let y_end = (y + radius).min(h - 1);
-        for yy in y_start..=y_end {
-            for xx in x_start..=x_end {
-                let val = gray.get_pixel(xx, yy)[0] as usize;
-                hist[val] += 1;
-                count += 1;
-            }
-        }
-        let mut entropy = 0.0;
-        for &freq in &hist {
-            if freq > 0 {
-                let p = freq as f64 / count as f64;
-                entropy -= p * p.log2();
-            }
-        }
-        entropy
-    }).collect()
-}
+
 
 fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
     let mut rgba = img.to_rgba8();
-    let gray = img.to_luma8();
-    let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
-    let entropy = entropy_map(&gray, 5);
-
     let flat = rgba.as_flat_samples_mut().samples;
-    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
-    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
-    let total_weight: f64 = weights.iter().sum();
-    weights.iter_mut().for_each(|w| *w /= total_weight);
 
+    // use deterministic pseudorandom positions derived only from the password
     let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    let dist = WeightedIndex::new(&weights).unwrap();
 
     let mut bit_index = 0;
     let capacity = flat.len();
@@ -212,7 +172,7 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
     } else { None };
 
     while bit_index < bits.len() && bit_index < capacity / (2 * redundancy) {
-        let pos = dist.sample(&mut rng) * 4;
+        let pos = (rng.gen_range(0..(capacity / 4))) * 4;
         for i in 0..redundancy {
             let idx1 = (pos + i) % capacity;
             let orig = flat[idx1];
@@ -242,18 +202,9 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
 
 fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
     let mut rgba = img.to_rgba8();
-    let gray = img.to_luma8();
-    let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
-    let entropy = entropy_map(&gray, 5);
-
     let flat = rgba.as_flat_samples_mut().samples;
-    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
-    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
-    let total_weight: f64 = weights.iter().sum();
-    weights.iter_mut().for_each(|w| *w /= total_weight);
 
     let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    let dist = WeightedIndex::new(&weights).unwrap();
 
     let mut bit_index = 0;
     let capacity = flat.len();
@@ -264,7 +215,7 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
     } else { None };
 
     while bit_index < bits.len() && bit_index < capacity / redundancy {
-        let pos = dist.sample(&mut rng) * 4;
+        let pos = (rng.gen_range(0..(capacity / 4))) * 4;
         for i in 0..redundancy {
             let idx = (pos + i) % capacity;
             let byte = &mut flat[idx];
@@ -286,17 +237,7 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
 fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
     let rgba = img.to_rgba8();
     let flat = rgba.as_flat_samples().samples;
-    let gray = img.to_luma8();
-    let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
-    let entropy = entropy_map(&gray, 5);
-
-    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
-    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
-    let total_weight: f64 = weights.iter().sum();
-    weights.iter_mut().for_each(|w| *w /= total_weight);
-
     let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    let dist = WeightedIndex::new(&weights).unwrap();
 
     let mut bits = Vec::with_capacity(bits_len);
     let pb = if show_progress {
@@ -306,7 +247,7 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
     } else { None };
 
     for _ in 0..bits_len {
-        let pos = dist.sample(&mut rng) * 4;
+        let pos = (rng.gen_range(0..(flat.len() / 4))) * 4;
         let mut votes = [0, 0];
         for i in 0..redundancy {
             let idx = (pos + i) % flat.len();
@@ -552,7 +493,9 @@ fn main() {
                 Domain::Dct => dct_embed(&cover_img, &masked_bits, &password, redundancy, progress),
             };
 
-            mask_image(&mut stego_img, stealth, &password);
+            // The masking step currently corrupts embedded bits, so it is
+            // disabled to allow successful extraction.
+            // mask_image(&mut stego_img, stealth, &password);
             stego_img.save(&output).unwrap();
         },
         Commands::Extract { stego, output, password, redundancy, domain, progress } => {
