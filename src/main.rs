@@ -483,6 +483,12 @@ fn main() {
     match cli.command {
         Commands::Embed { cover, secret, output, password, redundancy, domain, stealth, progress } => {
             let cover_img = image::open(&cover).expect("Failed to open cover image");
+
+            // Apply classifier-resistant masking prior to embedding so that
+            // the embedded bits are not altered by the masking operations.
+            let mut masked_rgba = cover_img.to_rgba8();
+            mask_image(&mut masked_rgba, stealth, &password);
+            let masked_img = DynamicImage::ImageRgba8(masked_rgba);
             let mut secret_file = File::open(&secret).expect("Failed to open secret file");
             let mut content = Vec::new();
             secret_file.read_to_end(&mut content).unwrap();
@@ -495,14 +501,13 @@ fn main() {
             let masked_bits = xor_bits(&final_bits, &key);
 
             let mut stego_img = match domain {
-                Domain::Lsb => adaptive_embed_lsb(&cover_img, &masked_bits, &password, redundancy, progress),
-                Domain::LsbMatch => adaptive_embed_lsb_match(&cover_img, &masked_bits, &password, redundancy, progress),
-                Domain::Dct => adaptive_embed_lsb_match(&cover_img, &masked_bits, &password, redundancy, progress),
+                Domain::Lsb => adaptive_embed_lsb(&masked_img, &masked_bits, &password, redundancy, progress),
+                Domain::LsbMatch => adaptive_embed_lsb_match(&masked_img, &masked_bits, &password, redundancy, progress),
+                Domain::Dct => adaptive_embed_lsb_match(&masked_img, &masked_bits, &password, redundancy, progress),
             };
 
-            // The masking step currently corrupts embedded bits, so it is
-            // disabled to allow successful extraction.
-            // mask_image(&mut stego_img, stealth, &password);
+            // stego_img already contains the masking transformations, so we can
+            // save it directly.
             stego_img.save(&output).unwrap();
         },
         Commands::Extract { stego, output, password, redundancy, domain, progress } => {
