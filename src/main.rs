@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use image::{DynamicImage, GenericImageView, RgbaImage, Luma};
+use image::{DynamicImage, GenericImageView, RgbaImage, Luma, GrayImage};
 use imageproc::gradients::sobel_gradient_map;
 use rand::{Rng, SeedableRng};
 use rand::distributions::{WeightedIndex, Distribution};
@@ -149,13 +149,47 @@ fn check_crc_and_len(bits: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+fn entropy_map(gray: &GrayImage, window: u32) -> Vec<f64> {
+    let (w, h) = gray.dimensions();
+    let mut map = vec![0.0; (w * h) as usize];
+    let radius = window / 2;
+    for y in 0..h {
+        for x in 0..w {
+            let mut hist = [0u32; 256];
+            let mut count = 0u32;
+            let x_start = x.saturating_sub(radius);
+            let y_start = y.saturating_sub(radius);
+            let x_end = (x + radius).min(w - 1);
+            let y_end = (y + radius).min(h - 1);
+            for yy in y_start..=y_end {
+                for xx in x_start..=x_end {
+                    let val = gray.get_pixel(xx, yy)[0] as usize;
+                    hist[val] += 1;
+                    count += 1;
+                }
+            }
+            let mut entropy = 0.0;
+            for &freq in &hist {
+                if freq > 0 {
+                    let p = freq as f64 / count as f64;
+                    entropy -= p * p.log2();
+                }
+            }
+            map[(y * w + x) as usize] = entropy;
+        }
+    }
+    map
+}
+
 fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
     let mut rgba = img.to_rgba8();
     let gray = img.to_luma8();
     let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
+    let entropy = entropy_map(&gray, 5);
 
     let flat = rgba.as_flat_samples_mut().samples;
-    let mut weights: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
     let total_weight: f64 = weights.iter().sum();
     weights.iter_mut().for_each(|w| *w /= total_weight);
 
@@ -203,9 +237,11 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
     let mut rgba = img.to_rgba8();
     let gray = img.to_luma8();
     let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
+    let entropy = entropy_map(&gray, 5);
 
     let flat = rgba.as_flat_samples_mut().samples;
-    let mut weights: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
     let total_weight: f64 = weights.iter().sum();
     weights.iter_mut().for_each(|w| *w /= total_weight);
 
@@ -245,8 +281,10 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
     let flat = rgba.as_flat_samples().samples;
     let gray = img.to_luma8();
     let gradient = sobel_gradient_map(&gray, |p| Luma([p[0] as u16]));
+    let entropy = entropy_map(&gray, 5);
 
-    let mut weights: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let grad_vals: Vec<f64> = gradient.pixels().map(|p| p[0] as f64 + 1.0).collect();
+    let mut weights: Vec<f64> = grad_vals.iter().zip(entropy.iter()).map(|(g,e)| g + e).collect();
     let total_weight: f64 = weights.iter().sum();
     weights.iter_mut().for_each(|w| *w /= total_weight);
 
