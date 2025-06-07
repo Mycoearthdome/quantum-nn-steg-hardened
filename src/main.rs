@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use image::{DynamicImage, GenericImageView, RgbaImage};
+use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 use rand::{Rng, SeedableRng};
 use rand::seq::SliceRandom;
 use rand::rngs::StdRng;
@@ -131,6 +131,68 @@ fn int_to_bits(val: usize, bits: usize) -> Vec<u8> {
 
 fn bits_to_int(bits: &[u8]) -> usize {
     bits.iter().fold(0, |acc, &b| (acc << 1) | b as usize)
+}
+
+fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let r = r as f32;
+    let g = g as f32;
+    let b = b as f32;
+    // Coefficients from JPEG File Interchange Format (Version 1.02)
+    let y  = 0.299_f32 * r + 0.587_f32 * g + 0.114_f32 * b;
+    let cb = -0.168736_f32 * r - 0.331264_f32 * g + 0.5_f32 * b + 128.0;
+    let cr = 0.5_f32 * r - 0.418688_f32 * g - 0.081312_f32 * b + 128.0;
+    (y, cb, cr)
+}
+
+fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32) -> (u8, u8, u8) {
+    let r = (y + 1.402_f32 * (cr - 128.0)).round().clamp(0.0, 255.0);
+    let g = (y - 0.344136_f32 * (cb - 128.0) - 0.714136_f32 * (cr - 128.0))
+        .round()
+        .clamp(0.0, 255.0);
+    let b = (y + 1.772_f32 * (cb - 128.0)).round().clamp(0.0, 255.0);
+    (r as u8, g as u8, b as u8)
+}
+
+fn dct_2d(block: &[[f32;8];8]) -> [[f32;8];8] {
+    let mut out = [[0f32;8];8];
+    for v in 0..8 {
+        for u in 0..8 {
+            let mut sum = 0f32;
+            for y in 0..8 {
+                for x in 0..8 {
+                    sum += block[y][x]
+                        * ((std::f32::consts::PI * (2*x + 1) as f32 * u as f32) / 16.0).cos()
+                        * ((std::f32::consts::PI * (2*y + 1) as f32 * v as f32) / 16.0).cos();
+                }
+            }
+            let cu = if u == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+            let cv = if v == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+            out[v][u] = 0.25 * cu * cv * sum;
+        }
+    }
+    out
+}
+
+fn idct_2d(block: &[[f32;8];8]) -> [[f32;8];8] {
+    let mut out = [[0f32;8];8];
+    for y in 0..8 {
+        for x in 0..8 {
+            let mut sum = 0f32;
+            for v in 0..8 {
+                for u in 0..8 {
+                    let cu = if u == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+                    let cv = if v == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+                    sum += cu
+                        * cv
+                        * block[v][u]
+                        * ((std::f32::consts::PI * (2*x + 1) as f32 * u as f32) / 16.0).cos()
+                        * ((std::f32::consts::PI * (2*y + 1) as f32 * v as f32) / 16.0).cos();
+                }
+            }
+            out[y][x] = 0.25 * sum;
+        }
+    }
+    out
 }
 
 fn compute_capacity(img: &DynamicImage, domain: Domain, redundancy: usize) -> usize {
@@ -307,14 +369,24 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
 }
 
 fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
-    use rustdct::DctPlanner;
     let mut rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
+    let mut y_plane = vec![0f32; (width * height) as usize];
+    let mut cb_plane = vec![0f32; (width * height) as usize];
+    let mut cr_plane = vec![0f32; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let p = rgba.get_pixel(x, y);
+            let (yy, cb, cr) = rgb_to_ycbcr(p[0], p[1], p[2]);
+            let idx = (y * width + x) as usize;
+            y_plane[idx] = yy;
+            cb_plane[idx] = cb;
+            cr_plane[idx] = cr;
+        }
+    }
+
     let blocks_w = (width / 8) as usize;
     let blocks_h = (height / 8) as usize;
-    let mut planner = DctPlanner::new();
-    let dct2 = planner.plan_dct2(8);
-    let idct = planner.plan_dct3(8);
 
     let capacity = blocks_w * blocks_h;
     let mut indices: Vec<usize> = (0..capacity).collect();
@@ -333,61 +405,67 @@ fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundanc
             if pos_idx >= indices.len() { break; }
             let idx = indices[pos_idx];
             pos_idx += 1;
-            let bx = (idx % blocks_w) as u32;
-            let by = (idx / blocks_w) as u32;
+            let bx = (idx % blocks_w) as usize;
+            let by = (idx / blocks_w) as usize;
 
             let mut block = [[0f32;8];8];
             for y in 0..8 {
                 for x in 0..8 {
-                    block[y][x] = rgba.get_pixel(bx*8 + x as u32, by*8 + y as u32)[0] as f32;
+                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
+                    block[y][x] = y_plane[idx_px];
                 }
             }
-            for row in &mut block { dct2.process_dct2(row); }
-            for x in 0..8 {
-                let mut col = [0f32;8];
-                for y in 0..8 { col[y] = block[y][x]; }
-                dct2.process_dct2(&mut col);
-                for y in 0..8 { block[y][x] = col[y]; }
-            }
+            let mut coeff = dct_2d(&block);
 
             let mut val = block[4][3].round() as i32;
             let want = bit as i32;
             let parity = (val.abs() & 1) as i32;
             if parity != want {
-                if val >= 0 { if want == 1 { val += 1; } else { val -= 1; } }
-                else { if want == 1 { val -= 1; } else { val += 1; } }
+                if val >= 0 {
+                    val += if want == 1 { 1 } else { -1 };
+                } else {
+                    val += if want == 1 { -1 } else { 1 };
+                }
+                // Strengthen change to survive rounding
+                if (val.abs() & 1) != want { val += if val >=0 {2} else {-2}; }
             }
-            block[4][3] = val as f32;
-
-            for x in 0..8 {
-                let mut col = [0f32;8];
-                for y in 0..8 { col[y] = block[y][x]; }
-                idct.process_dct3(&mut col);
-                for y in 0..8 { block[y][x] = col[y]; }
-            }
-            for row in &mut block { idct.process_dct3(row); }
+            coeff[4][3] = val as f32;
+            let block = idct_2d(&coeff);
             for y in 0..8 {
                 for x in 0..8 {
-                    let val = block[y][x].round().clamp(0.0, 255.0) as u8;
-                    let p = rgba.get_pixel_mut(bx*8 + x as u32, by*8 + y as u32);
-                    p.0[0] = val;
+                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
+                    y_plane[idx_px] = block[y][x].round().clamp(0.0, 255.0);
                 }
             }
         }
         if let Some(ref bar) = pb { bar.inc(1); }
     }
     if let Some(bar) = pb { bar.finish_with_message("Embedding complete"); }
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let (r, g, b) = ycbcr_to_rgb(y_plane[idx], cb_plane[idx], cr_plane[idx]);
+            let a = rgba.get_pixel(x, y)[3];
+            rgba.put_pixel(x, y, Rgba([r, g, b, a]));
+        }
+    }
     rgba
 }
 
 fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
-    use rustdct::DctPlanner;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
+    let mut y_plane = vec![0f32; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let p = rgba.get_pixel(x, y);
+            let (yy, _, _) = rgb_to_ycbcr(p[0], p[1], p[2]);
+            y_plane[(y * width + x) as usize] = yy;
+        }
+    }
     let blocks_w = (width / 8) as usize;
     let blocks_h = (height / 8) as usize;
-    let mut planner = DctPlanner::new();
-    let dct2 = planner.plan_dct2(8);
 
     let capacity = blocks_w * blocks_h;
     let mut indices: Vec<usize> = (0..capacity).collect();
@@ -408,23 +486,18 @@ fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, red
             if pos_idx >= indices.len() { break; }
             let idx = indices[pos_idx];
             pos_idx += 1;
-            let bx = (idx % blocks_w) as u32;
-            let by = (idx / blocks_w) as u32;
+            let bx = (idx % blocks_w) as usize;
+            let by = (idx / blocks_w) as usize;
 
             let mut block = [[0f32;8];8];
             for y in 0..8 {
                 for x in 0..8 {
-                    block[y][x] = rgba.get_pixel(bx*8 + x as u32, by*8 + y as u32)[0] as f32;
+                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
+                    block[y][x] = y_plane[idx_px];
                 }
             }
-            for row in &mut block { dct2.process_dct2(row); }
-            for x in 0..8 {
-                let mut col = [0f32;8];
-                for y in 0..8 { col[y] = block[y][x]; }
-                dct2.process_dct2(&mut col);
-                for y in 0..8 { block[y][x] = col[y]; }
-            }
-            let val = block[4][3].round() as i32;
+            let coeff = dct_2d(&block);
+            let val = coeff[4][3].round() as i32;
             let bit = (val.abs() & 1) as usize;
             votes[bit] += 1;
         }
@@ -529,12 +602,17 @@ fn detect_lsb_match(img: &DynamicImage) -> f64 {
 }
 
 fn detect_dct_parity(img: &DynamicImage) -> f64 {
-    use rustdct::DctPlanner;
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
     if width < 8 || height < 8 { return 0.0; }
-    let mut planner = DctPlanner::new();
-    let dct = planner.plan_dct2(8);
+    let mut y_plane = vec![0f32; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let p = rgba.get_pixel(x, y);
+            let (yy, _, _) = rgb_to_ycbcr(p[0], p[1], p[2]);
+            y_plane[(y * width + x) as usize] = yy;
+        }
+    }
 
     let mut counts = [0usize; 2];
     for by in 0..height/8 {
@@ -542,18 +620,12 @@ fn detect_dct_parity(img: &DynamicImage) -> f64 {
             let mut block = [[0f32;8];8];
             for y in 0..8 {
                 for x in 0..8 {
-                    let px = rgba.get_pixel(bx*8 + x, by*8 + y);
-                    block[y as usize][x as usize] = px[0] as f32;
+                    let idx_px = ((by*8 + y) * width + (bx*8 + x)) as usize;
+                    block[y as usize][x as usize] = y_plane[idx_px];
                 }
             }
-            for row in &mut block { dct.process_dct2(row); }
-            for x in 0..8 {
-                let mut col = [0f32;8];
-                for y in 0..8 { col[y as usize] = block[y as usize][x as usize]; }
-                dct.process_dct2(&mut col);
-                for y in 0..8 { block[y as usize][x as usize] = col[y as usize]; }
-            }
-            let val = block[4][3].round() as i32;
+            let coeff = dct_2d(&block);
+            let val = coeff[4][3].round() as i32;
             counts[(val & 1) as usize] += 1;
         }
     }
@@ -644,8 +716,21 @@ fn main() {
             let stego_img = embed_with_optimization(&cover_img, &masked_bits, &password, domain, redundancy, stealth, optimize, progress);
 
             // stego_img already contains the masking transformations, so we can
-            // save it directly.
-            stego_img.save(&output).unwrap();
+            // save it directly. When saving as JPEG, use quality 100 to
+            // minimize loss so DCT-embedded bits remain intact.
+            use std::path::Path;
+            let out_path = Path::new(&output);
+            match out_path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()) {
+                Some(ext) if ext == "jpg" || ext == "jpeg" => {
+                    let dynimg = image::DynamicImage::ImageRgba8(stego_img.clone());
+                    let mut file = File::create(out_path).unwrap();
+                    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, 100);
+                    encoder.encode_image(&dynimg).unwrap();
+                }
+                _ => {
+                    stego_img.save(out_path).unwrap();
+                }
+            }
         },
         Commands::Extract { stego, output, password, redundancy, domain, progress } => {
             let stego_loaded = image::open(&stego).expect("Failed to open stego image");
