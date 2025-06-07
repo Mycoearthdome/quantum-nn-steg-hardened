@@ -107,19 +107,18 @@ fn bz2_decompress(data: &[u8]) -> Vec<u8> {
 
 fn generate_bits_fast(n: usize, password: &str) -> Vec<u8> {
     let mut bits = Vec::with_capacity(n);
-    let mut counter: u32 = 0;
-    let mut hasher = Sha512::new();
+    let mut counter: u64 = 0;
     while bits.len() < n {
+        let mut hasher = Sha512::new();
         hasher.update(password.as_bytes());
         hasher.update(counter.to_be_bytes());
-        let digest = hasher.finalize_reset();
+        let digest = hasher.finalize();
         for byte in digest {
             for i in (0..8).rev() {
+                if bits.len() == n { break; }
                 bits.push((byte >> i) & 1);
-                if bits.len() == n {
-                    break;
-                }
             }
+            if bits.len() == n { break; }
         }
         counter += 1;
     }
@@ -132,6 +131,17 @@ fn int_to_bits(val: usize, bits: usize) -> Vec<u8> {
 
 fn bits_to_int(bits: &[u8]) -> usize {
     bits.iter().fold(0, |acc, &b| (acc << 1) | b as usize)
+}
+
+fn compute_capacity(img: &DynamicImage, domain: Domain, redundancy: usize) -> usize {
+    match domain {
+        Domain::Lsb => img.to_rgba8().as_flat_samples().samples.len() / (2 * redundancy),
+        Domain::LsbMatch => img.to_rgba8().as_flat_samples().samples.len() / redundancy,
+        Domain::Dct => {
+            let (w, h) = img.dimensions();
+            ((w / 8) * (h / 8)) as usize
+        }
+    }
 }
 
 fn add_crc_and_len(bits: &[u8]) -> Vec<u8> {
@@ -181,8 +191,10 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
         Some(bar)
     } else { None };
 
+    let mut positions: Vec<usize> = (0..capacity/4).map(|p| p*4).collect();
+    positions.shuffle(&mut rng);
     while bit_index < bits.len() && bit_index < capacity / (2 * redundancy) {
-        let pos = (rng.gen_range(0..(capacity / 4))) * 4;
+        let pos = positions[bit_index % positions.len()];
         for i in 0..redundancy {
             let idx1 = (pos + i) % capacity;
             let orig = flat[idx1];
@@ -226,8 +238,10 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
         Some(bar)
     } else { None };
 
+    let mut positions: Vec<usize> = (0..capacity/4).map(|p| p*4).collect();
+    positions.shuffle(&mut rng_pos);
     while bit_index < bits.len() && bit_index < capacity / redundancy {
-        let pos = (rng_pos.gen_range(0..(capacity / 4))) * 4;
+        let pos = positions[bit_index % positions.len()];
         for i in 0..redundancy {
             let idx = (pos + i) % capacity;
             let byte = &mut flat[idx];
@@ -258,8 +272,10 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
         Some(bar)
     } else { None };
 
-    for _ in 0..bits_len {
-        let pos = (rng.gen_range(0..(flat.len() / 4))) * 4;
+    let mut positions: Vec<usize> = (0..flat.len()/4).map(|p| p*4).collect();
+    positions.shuffle(&mut rng);
+    for i in 0..bits_len {
+        let pos = positions[i % positions.len()];
         let mut votes = [0, 0];
         for i in 0..redundancy {
             let idx = (pos + i) % flat.len();
@@ -619,6 +635,12 @@ fn main() {
             let raw_bits = bytes_to_bits(&compressed);
             let final_bits = add_crc_and_len(&raw_bits);
 
+            let capacity = compute_capacity(&cover_img, domain, redundancy);
+            if final_bits.len() > capacity {
+                println!("[ERROR] Secret too large for cover image with current settings ({} bits > {} bits).", final_bits.len(), capacity);
+                return;
+            }
+
             let key = generate_bits_fast(final_bits.len(), &password);
             let masked_bits = xor_bits(&final_bits, &key);
 
@@ -635,10 +657,8 @@ fn main() {
                 let mut secret_file = File::open(&stego).unwrap();
                 secret_file.read_to_end(&mut Vec::new()).unwrap();
             }
-            // We don't know length yet; we will extract as many bits as image capacity
-            let capacity = match domain {
-                Domain::Lsb | Domain::LsbMatch | Domain::Dct => stego_loaded.to_rgba8().as_flat_samples().samples.len() / redundancy,
-            };
+            // We don't know exact length yet; extract up to the embedding capacity
+            let capacity = compute_capacity(&stego_loaded, domain, redundancy);
             bits_len = capacity;
 
             let extracted_bits = match domain {
