@@ -11,7 +11,6 @@ use crc32fast::Hasher as Crc32Hasher;
 use bzip2::read::{BzEncoder, BzDecoder};
 use bzip2::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
-use rustdct::DctPlanner;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -69,7 +68,6 @@ enum Commands {
 #[derive(Copy, Clone, ValueEnum)]
 enum Domain {
     Lsb,
-    Dct,
     LsbMatch,
 }
 
@@ -154,60 +152,11 @@ fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
     (r as u8, g as u8, b as u8)
 }
 
-fn dct_2d(block: &[[f64; 8]; 8]) -> [[f64; 8]; 8] {
-    let mut planner = DctPlanner::new();
-    let dct = planner.plan_dct2(8);
-    let mut temp = [[0f64; 8]; 8];
-    for (y, row) in block.iter().enumerate() {
-        let mut buf = *row;
-        dct.process_dct2(&mut buf);
-        temp[y] = buf;
-    }
-    let mut out = [[0f64; 8]; 8];
-    for x in 0..8 {
-        let mut col = [0f64; 8];
-        for y in 0..8 {
-            col[y] = temp[y][x];
-        }
-        dct.process_dct2(&mut col);
-        for y in 0..8 {
-            out[y][x] = col[y];
-        }
-    }
-    out
-}
-
-fn idct_2d(block: &[[f64; 8]; 8]) -> [[f64; 8]; 8] {
-    let mut planner = DctPlanner::new();
-    let idct = planner.plan_dct3(8);
-    let mut temp = [[0f64; 8]; 8];
-    for (y, row) in block.iter().enumerate() {
-        let mut buf = *row;
-        idct.process_dct3(&mut buf);
-        temp[y] = buf;
-    }
-    let mut out = [[0f64; 8]; 8];
-    for x in 0..8 {
-        let mut col = [0f64; 8];
-        for y in 0..8 {
-            col[y] = temp[y][x];
-        }
-        idct.process_dct3(&mut col);
-        for y in 0..8 {
-            out[y][x] = col[y];
-        }
-    }
-    out
-}
 
 fn compute_capacity(img: &DynamicImage, domain: Domain, redundancy: usize) -> usize {
     match domain {
         Domain::Lsb => img.to_rgba8().as_flat_samples().samples.len() / (2 * redundancy),
         Domain::LsbMatch => img.to_rgba8().as_flat_samples().samples.len() / redundancy,
-        Domain::Dct => {
-            let (w, h) = img.dimensions();
-            ((w / 8) * (h / 8)) as usize / redundancy
-        }
     }
 }
 
@@ -373,166 +322,6 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
     bits
 }
 
-fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
-    let mut rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    let mut y_plane = vec![0f64; (width * height) as usize];
-    let mut cb_plane = vec![0f64; (width * height) as usize];
-    let mut cr_plane = vec![0f64; (width * height) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            let p = rgba.get_pixel(x, y);
-            let (yy, cb, cr) = rgb_to_ycbcr(p[0], p[1], p[2]);
-            let idx = (y * width + x) as usize;
-            y_plane[idx] = yy;
-            cb_plane[idx] = cb;
-            cr_plane[idx] = cr;
-        }
-    }
-
-    let blocks_w = (width / 8) as usize;
-    let blocks_h = (height / 8) as usize;
-
-    let capacity = blocks_w * blocks_h;
-    let mut indices: Vec<usize> = (0..capacity).collect();
-    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    indices.shuffle(&mut rng);
-
-    let pb = if show_progress {
-        let bar = ProgressBar::new(bits.len() as u64);
-        bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
-        Some(bar)
-    } else { None };
-
-    let mut pos_idx = 0;
-    for &bit in bits {
-        for _ in 0..redundancy {
-            if pos_idx >= indices.len() { break; }
-            let idx = indices[pos_idx];
-            pos_idx += 1;
-            let bx = (idx % blocks_w) as usize;
-            let by = (idx / blocks_w) as usize;
-
-            let mut block = [[0f64;8];8];
-            for y in 0..8 {
-                for x in 0..8 {
-                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
-                    block[y][x] = y_plane[idx_px];
-                }
-            }
-            let mut coeff = dct_2d(&block);
-
-            // embed the bit in a mid-band DCT coefficient rather than the
-            // spatial domain value. using the coefficient ensures symmetry with
-            // extraction and actually modifies the frequency component.
-            let mut val = coeff[4][3].round() as i32;
-            let want = bit as i32;
-            let parity = (val.abs() & 1) as i32;
-            if parity != want {
-                if val >= 0 {
-                    val += if want == 1 { 1 } else { -1 };
-                } else {
-                    val += if want == 1 { -1 } else { 1 };
-                }
-                if (val.abs() & 1) != want { val += if val >=0 {2} else {-2}; }
-            }
-            coeff[4][3] = val as f64;
-            let mut block = idct_2d(&coeff);
-            for y in 0..8 {
-                for x in 0..8 {
-                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
-                    y_plane[idx_px] = block[y][x].round().clamp(0.0, 255.0);
-                }
-            }
-            let mut verify = [[0f64;8];8];
-            for y in 0..8 {
-                for x in 0..8 {
-                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
-                    verify[y][x] = y_plane[idx_px];
-                }
-            }
-            let check = dct_2d(&verify)[4][3].round() as i32;
-            if (check.abs() & 1) != want {
-                val += if val >= 0 { if want == 1 { 2 } else { -2 } } else { if want == 1 { -2 } else { 2 } };
-                coeff[4][3] = val as f64;
-                block = idct_2d(&coeff);
-                for y in 0..8 {
-                    for x in 0..8 {
-                        let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
-                        y_plane[idx_px] = block[y][x].round().clamp(0.0, 255.0);
-                    }
-                }
-            }
-        }
-        if let Some(ref bar) = pb { bar.inc(1); }
-    }
-    if let Some(bar) = pb { bar.finish_with_message("Embedding complete"); }
-
-    for y in 0..height {
-        for x in 0..width {
-            let idx = (y * width + x) as usize;
-            let (r, g, b) = ycbcr_to_rgb(y_plane[idx], cb_plane[idx], cr_plane[idx]);
-            let a = rgba.get_pixel(x, y)[3];
-            rgba.put_pixel(x, y, Rgba([r, g, b, a]));
-        }
-    }
-    rgba
-}
-
-fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    let mut y_plane = vec![0f64; (width * height) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            let p = rgba.get_pixel(x, y);
-            let (yy, _, _) = rgb_to_ycbcr(p[0], p[1], p[2]);
-            y_plane[(y * width + x) as usize] = yy;
-        }
-    }
-    let blocks_w = (width / 8) as usize;
-    let blocks_h = (height / 8) as usize;
-
-    let capacity = blocks_w * blocks_h;
-    let mut indices: Vec<usize> = (0..capacity).collect();
-    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
-    indices.shuffle(&mut rng);
-
-    let pb = if show_progress {
-        let bar = ProgressBar::new(bits_len as u64);
-        bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
-        Some(bar)
-    } else { None };
-
-    let mut pos_idx = 0;
-    let mut out = Vec::with_capacity(bits_len);
-    for _ in 0..bits_len {
-        let mut votes = [0usize;2];
-        for _ in 0..redundancy {
-            if pos_idx >= indices.len() { break; }
-            let idx = indices[pos_idx];
-            pos_idx += 1;
-            let bx = (idx % blocks_w) as usize;
-            let by = (idx / blocks_w) as usize;
-
-            let mut block = [[0f64;8];8];
-            for y in 0..8 {
-                for x in 0..8 {
-                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
-                    block[y][x] = y_plane[idx_px];
-                }
-            }
-            let coeff = dct_2d(&block);
-            let val = coeff[4][3].round() as i32;
-            let bit = (val.abs() & 1) as usize;
-            votes[bit] += 1;
-        }
-        out.push(if votes[1] > votes[0] { 1 } else { 0 });
-        if let Some(ref bar) = pb { bar.inc(1); }
-    }
-    if let Some(bar) = pb { bar.finish_with_message("Extraction complete"); }
-    out
-}
 
 
 fn mask_low(img: &mut RgbaImage, rng: &mut StdRng) {
@@ -627,55 +416,17 @@ fn detect_lsb_match(img: &DynamicImage) -> f64 {
     diff1 as f64 / (bytes.len() - 1) as f64
 }
 
-fn detect_dct_parity(img: &DynamicImage) -> f64 {
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    if width < 8 || height < 8 { return 0.0; }
-    let mut y_plane = vec![0f64; (width * height) as usize];
-    for y in 0..height {
-        for x in 0..width {
-            let p = rgba.get_pixel(x, y);
-            let (yy, _, _) = rgb_to_ycbcr(p[0], p[1], p[2]);
-            y_plane[(y * width + x) as usize] = yy;
-        }
-    }
-
-    let mut counts = [0usize; 2];
-    for by in 0..height/8 {
-        for bx in 0..width/8 {
-            let mut block = [[0f64;8];8];
-            for y in 0..8 {
-                for x in 0..8 {
-                    let idx_px = ((by*8 + y) * width + (bx*8 + x)) as usize;
-                    block[y as usize][x as usize] = y_plane[idx_px];
-                }
-            }
-            let coeff = dct_2d(&block);
-            let val = coeff[4][3].round() as i32;
-            counts[(val & 1) as usize] += 1;
-        }
-    }
-    let total = (counts[0] + counts[1]) as f64;
-    if total == 0.0 { return 0.0; }
-    let expected = total / 2.0;
-    ((counts[0] as f64 - expected).powi(2) / expected) +
-        ((counts[1] as f64 - expected).powi(2) / expected)
-}
-
 fn run_adversarial_tests(img: &DynamicImage) -> f64 {
     let lsb_chi = detect_lsb_randomness(img);
     let lsb_match_rate = detect_lsb_match(img);
-    let dct_chi = detect_dct_parity(img);
     println!("[INFO] LSB chi-square statistic: {:.4}", lsb_chi);
     println!("[INFO] LSB-match diff rate: {:.4}", lsb_match_rate);
-    println!("[INFO] DCT parity chi-square: {:.4}", dct_chi);
 
     fn logistic(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
 
     let lsb_score = logistic((lsb_chi - 2.0) / 2.0);
     let lsb_match_score = logistic((lsb_match_rate - 0.01) / 0.01);
-    let dct_score = logistic((dct_chi - 2.0) / 2.0);
-    let confidence = (lsb_score + lsb_match_score + dct_score) / 3.0 * 100.0;
+    let confidence = (lsb_score + lsb_match_score) / 2.0 * 100.0;
     println!(
         "[INFO] Approximate likelihood of recoverable hidden data: {:.1}%",
         confidence
@@ -702,7 +453,6 @@ fn embed_with_optimization(
         let stego = match domain {
             Domain::Lsb => adaptive_embed_lsb(&masked, bits, password, redundancy, progress && attempts==1),
             Domain::LsbMatch => adaptive_embed_lsb_match(&masked, bits, password, redundancy, progress && attempts==1),
-            Domain::Dct => adaptive_embed_dct(&masked, bits, password, redundancy, progress && attempts==1),
         };
         let score = run_adversarial_tests(&DynamicImage::ImageRgba8(stego.clone()));
         if score < best_score {
@@ -772,7 +522,6 @@ fn main() {
             let extracted_bits = match domain {
                 Domain::Lsb => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
                 Domain::LsbMatch => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
-                Domain::Dct => adaptive_extract_dct(&stego_loaded, bits_len, &password, redundancy, progress),
             };
             let key = generate_bits_fast(bits_len, &password);
             let unmasked_bits = xor_bits(&extracted_bits[..bits_len], &key);

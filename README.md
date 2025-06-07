@@ -16,13 +16,9 @@ This system includes **five layers** of anti-detection defenses:
 3. **Redundant Adaptive Embedding**  
    Each bit is embedded multiple times (e.g. 3×) and recovered by majority vote.
 
-4. **Transform-Domain Embedding (DCT)**
-   Optionally embeds payload into mid-band JPEG-DCT coefficients for added stealth.
-
-5. **Classifier-Resistant Statistical Masking**
+4. **Classifier-Resistant Statistical Masking**
    RS-safe, patch-based shuffling is applied at high stealth level to preserve global statistics while disrupting local correlations.
-
-6. **Adversarial Detection**
+5. **Adversarial Detection**
    Analyze an image for signs it was produced by this tool using any embedding mode.
 
 ---
@@ -58,12 +54,11 @@ cargo run --release --   detect   --image stego.png
 The detection output now also prints a heuristic percentage indicating the
 likelihood that the image contains recoverable hidden data.
 
----
 
 ## 🧠 Advanced Options
 
 - `--redundancy 3` — set bit redundancy factor (default: 3)
-- `--domain lsb|lsb-match|dct` — select embedding domain
+- `--domain lsb|lsb-match` — select embedding domain
 - `--stealth high|medium|low` — control aggressiveness of classifier masking
 - `--progress` — show progress bar and estimated time
 - `--optimize N` — try multiple masking variations and keep the best (default: 1)
@@ -79,7 +74,6 @@ bits remain intact during extraction.
 - [x] HPLSB & entropy masking
 - [x] Redundancy encoding
 - [x] CLI framework
-- [x] Mid-band DCT embedding
 - [x] RS/Class-safe masking
 - [x] Adversarial detection
 - [ ] Embedded benchmarking suite (entropy, histogram diff, detectability)
