@@ -11,6 +11,7 @@ use crc32fast::Hasher as Crc32Hasher;
 use bzip2::read::{BzEncoder, BzDecoder};
 use bzip2::Compression;
 use indicatif::{ProgressBar, ProgressStyle};
+use rustdct::DctPlanner;
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -153,43 +154,47 @@ fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
     (r as u8, g as u8, b as u8)
 }
 
-fn dct_2d(block: &[[f64;8];8]) -> [[f64;8];8] {
-    let mut out = [[0f64;8];8];
-    for v in 0..8 {
-        for u in 0..8 {
-            let mut sum = 0f64;
-            for y in 0..8 {
-                for x in 0..8 {
-                    sum += block[y][x]
-                        * ((std::f64::consts::PI * (2*x + 1) as f64 * u as f64) / 16.0).cos()
-                        * ((std::f64::consts::PI * (2*y + 1) as f64 * v as f64) / 16.0).cos();
-                }
-            }
-            let cu = if u == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-            let cv = if v == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-            out[v][u] = 0.25 * cu * cv * sum;
+fn dct_2d(block: &[[f64; 8]; 8]) -> [[f64; 8]; 8] {
+    let mut planner = DctPlanner::new();
+    let dct = planner.plan_dct2(8);
+    let mut temp = [[0f64; 8]; 8];
+    for (y, row) in block.iter().enumerate() {
+        let mut buf = *row;
+        dct.process_dct2(&mut buf);
+        temp[y] = buf;
+    }
+    let mut out = [[0f64; 8]; 8];
+    for x in 0..8 {
+        let mut col = [0f64; 8];
+        for y in 0..8 {
+            col[y] = temp[y][x];
+        }
+        dct.process_dct2(&mut col);
+        for y in 0..8 {
+            out[y][x] = col[y];
         }
     }
     out
 }
 
-fn idct_2d(block: &[[f64;8];8]) -> [[f64;8];8] {
-    let mut out = [[0f64;8];8];
-    for y in 0..8 {
-        for x in 0..8 {
-            let mut sum = 0f64;
-            for v in 0..8 {
-                for u in 0..8 {
-                    let cu = if u == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-                    let cv = if v == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
-                    sum += cu
-                        * cv
-                        * block[v][u]
-                        * ((std::f64::consts::PI * (2*x + 1) as f64 * u as f64) / 16.0).cos()
-                        * ((std::f64::consts::PI * (2*y + 1) as f64 * v as f64) / 16.0).cos();
-                }
-            }
-            out[y][x] = 0.25 * sum;
+fn idct_2d(block: &[[f64; 8]; 8]) -> [[f64; 8]; 8] {
+    let mut planner = DctPlanner::new();
+    let idct = planner.plan_dct3(8);
+    let mut temp = [[0f64; 8]; 8];
+    for (y, row) in block.iter().enumerate() {
+        let mut buf = *row;
+        idct.process_dct3(&mut buf);
+        temp[y] = buf;
+    }
+    let mut out = [[0f64; 8]; 8];
+    for x in 0..8 {
+        let mut col = [0f64; 8];
+        for y in 0..8 {
+            col[y] = temp[y][x];
+        }
+        idct.process_dct3(&mut col);
+        for y in 0..8 {
+            out[y][x] = col[y];
         }
     }
     out
