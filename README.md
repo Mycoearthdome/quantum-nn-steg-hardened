@@ -9,8 +9,9 @@ This system includes **five layers** of anti-detection defenses:
 1. **Histogram-Preserving LSB (HPLSB)**  
    Prevents statistical anomalies in pixel histograms after bit embedding.
 
-2. **Entropy-Weighted Embedding**  
-   Selects high-entropy (visually complex) regions using Sobel filtering and entropy maps.
+2. **Entropy-Weighted Embedding**
+   Selects high-entropy (visually complex) regions using Sobel filtering and
+   local Shannon entropy computed over a sliding window.
 
 3. **Redundant Adaptive Embedding**  
    Each bit is embedded multiple times (e.g. 3×) and recovered by majority vote.
