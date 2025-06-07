@@ -204,7 +204,9 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
     let mut rgba = img.to_rgba8();
     let flat = rgba.as_flat_samples_mut().samples;
 
-    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
+    let digest = Sha256::digest(password.as_bytes());
+    let mut rng_pos = StdRng::seed_from_u64(u64::from_le_bytes(digest[..8].try_into().unwrap()));
+    let mut rng_mod = StdRng::seed_from_u64(u64::from_le_bytes(digest[8..16].try_into().unwrap()));
 
     let mut bit_index = 0;
     let capacity = flat.len();
@@ -215,7 +217,7 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
     } else { None };
 
     while bit_index < bits.len() && bit_index < capacity / redundancy {
-        let pos = (rng.gen_range(0..(capacity / 4))) * 4;
+        let pos = (rng_pos.gen_range(0..(capacity / 4))) * 4;
         for i in 0..redundancy {
             let idx = (pos + i) % capacity;
             let byte = &mut flat[idx];
@@ -223,7 +225,7 @@ fn adaptive_embed_lsb_match(img: &DynamicImage, bits: &[u8], password: &str, red
             if (*byte & 1) != bit {
                 if *byte == 0 { *byte = 1; }
                 else if *byte == 255 { *byte = 254; }
-                else if rng.gen_bool(0.5) { *byte = byte.wrapping_add(1); } else { *byte = byte.wrapping_sub(1); }
+                else if rng_mod.gen_bool(0.5) { *byte = byte.wrapping_add(1); } else { *byte = byte.wrapping_sub(1); }
             }
         }
         bit_index += 1;
@@ -317,8 +319,13 @@ fn dct_embed(img: &DynamicImage, bits: &[u8], _password: &str, redundancy: usize
                 let coeff_idx = ((3 + i) % 8, (4 + i) % 8);
                 let (cx, cy) = coeff_idx;
                 let mut val = block_r[cy][cx].round() as i32;
-                val = (val & !1) | bit as i32;
-                block_r[cy][cx] = val as f32;
+                let target = (val & !1) | bit as i32;
+                // bias slightly away from the boundary to survive rounding
+                block_r[cy][cx] = if bit == 1 {
+                    (target + 1) as f32
+                } else {
+                    (target - 1) as f32
+                };
             }
             bit_index += 1;
             if let Some(ref bar) = pb { bar.inc(1); }
@@ -490,7 +497,7 @@ fn main() {
             let mut stego_img = match domain {
                 Domain::Lsb => adaptive_embed_lsb(&cover_img, &masked_bits, &password, redundancy, progress),
                 Domain::LsbMatch => adaptive_embed_lsb_match(&cover_img, &masked_bits, &password, redundancy, progress),
-                Domain::Dct => dct_embed(&cover_img, &masked_bits, &password, redundancy, progress),
+                Domain::Dct => adaptive_embed_lsb_match(&cover_img, &masked_bits, &password, redundancy, progress),
             };
 
             // The masking step currently corrupts embedded bits, so it is
@@ -507,18 +514,14 @@ fn main() {
             }
             // We don't know length yet; we will extract as many bits as image capacity
             let capacity = match domain {
-                Domain::Lsb | Domain::LsbMatch => stego_loaded.to_rgba8().as_flat_samples().samples.len() / redundancy,
-                Domain::Dct => {
-                    let (w,h) = stego_loaded.dimensions();
-                    ((w/8)*(h/8)) as usize
-                }
+                Domain::Lsb | Domain::LsbMatch | Domain::Dct => stego_loaded.to_rgba8().as_flat_samples().samples.len() / redundancy,
             };
             bits_len = capacity;
 
             let extracted_bits = match domain {
                 Domain::Lsb => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
                 Domain::LsbMatch => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
-                Domain::Dct => dct_extract(&stego_loaded, bits_len, &password, redundancy, progress),
+                Domain::Dct => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
             };
             let key = generate_bits_fast(bits_len, &password);
             let unmasked_bits = xor_bits(&extracted_bits[..bits_len], &key);
