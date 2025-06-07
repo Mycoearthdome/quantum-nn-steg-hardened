@@ -55,6 +55,8 @@ cargo run --release --   extract   --stego stego.png   --output extracted_secret
 ```bash
 cargo run --release --   detect   --image stego.png
 ```
+The detection output now also prints a heuristic percentage indicating the
+likelihood that the image contains recoverable hidden data.
 
 ---
 

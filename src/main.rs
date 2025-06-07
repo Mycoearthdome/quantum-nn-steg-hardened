@@ -548,6 +548,17 @@ fn run_adversarial_tests(img: &DynamicImage) {
     println!("[INFO] LSB chi-square statistic: {:.4}", lsb_chi);
     println!("[INFO] LSB-match diff rate: {:.4}", lsb_match_rate);
     println!("[INFO] DCT parity chi-square: {:.4}", dct_chi);
+
+    fn logistic(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
+
+    let lsb_score = logistic((lsb_chi - 2.0) / 2.0);
+    let lsb_match_score = logistic((lsb_match_rate - 0.01) / 0.01);
+    let dct_score = logistic((dct_chi - 2.0) / 2.0);
+    let confidence = (lsb_score + lsb_match_score + dct_score) / 3.0 * 100.0;
+    println!(
+        "[INFO] Approximate likelihood of recoverable hidden data: {:.1}%",
+        confidence
+    );
 }
 
 fn main() {
