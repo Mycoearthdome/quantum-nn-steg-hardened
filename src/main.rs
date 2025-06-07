@@ -38,6 +38,12 @@ enum Commands {
         stealth: StealthLevel,
         #[arg(long, default_value_t = false)]
         progress: bool,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Number of masking attempts; the run with the lowest detection score is kept",
+        )]
+        optimize: usize,
     },
     Extract {
         #[arg(long)]
@@ -473,8 +479,12 @@ fn mask_high(img: &mut RgbaImage, rng: &mut StdRng) {
     mask_rs_safe(img, rng);
 }
 
-fn mask_image(img: &mut RgbaImage, level: StealthLevel, password: &str) {
-    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
+fn mask_image(img: &mut RgbaImage, level: StealthLevel, password: &str, attempt: u64) {
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    hasher.update(attempt.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(digest[..8].try_into().unwrap()));
     match level {
         StealthLevel::Low => mask_low(img, &mut rng),
         StealthLevel::Medium => mask_medium(img, &mut rng),
@@ -541,7 +551,7 @@ fn detect_dct_parity(img: &DynamicImage) -> f64 {
         ((counts[1] as f64 - expected).powi(2) / expected)
 }
 
-fn run_adversarial_tests(img: &DynamicImage) {
+fn run_adversarial_tests(img: &DynamicImage) -> f64 {
     let lsb_chi = detect_lsb_randomness(img);
     let lsb_match_rate = detect_lsb_match(img);
     let dct_chi = detect_dct_parity(img);
@@ -559,19 +569,48 @@ fn run_adversarial_tests(img: &DynamicImage) {
         "[INFO] Approximate likelihood of recoverable hidden data: {:.1}%",
         confidence
     );
+    confidence
+}
+
+fn embed_with_optimization(
+    cover_img: &DynamicImage,
+    bits: &[u8],
+    password: &str,
+    domain: Domain,
+    redundancy: usize,
+    stealth: StealthLevel,
+    attempts: usize,
+    progress: bool,
+) -> RgbaImage {
+    let mut best_img = None;
+    let mut best_score = f64::INFINITY;
+    for attempt in 0..attempts {
+        let mut img = cover_img.to_rgba8();
+        mask_image(&mut img, stealth, password, attempt as u64);
+        let masked = DynamicImage::ImageRgba8(img);
+        let stego = match domain {
+            Domain::Lsb => adaptive_embed_lsb(&masked, bits, password, redundancy, progress && attempts==1),
+            Domain::LsbMatch => adaptive_embed_lsb_match(&masked, bits, password, redundancy, progress && attempts==1),
+            Domain::Dct => adaptive_embed_lsb_match(&masked, bits, password, redundancy, progress && attempts==1),
+        };
+        let score = run_adversarial_tests(&DynamicImage::ImageRgba8(stego.clone()));
+        if score < best_score {
+            best_score = score;
+            best_img = Some(stego);
+        }
+    }
+    println!("[INFO] Selected embedding with score {:.1}%", best_score);
+    best_img.expect("No embedding produced")
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Embed { cover, secret, output, password, redundancy, domain, stealth, progress } => {
+        Commands::Embed { cover, secret, output, password, redundancy, domain, stealth, progress, optimize } => {
             let cover_img = image::open(&cover).expect("Failed to open cover image");
 
             // Apply classifier-resistant masking prior to embedding so that
             // the embedded bits are not altered by the masking operations.
-            let mut masked_rgba = cover_img.to_rgba8();
-            mask_image(&mut masked_rgba, stealth, &password);
-            let masked_img = DynamicImage::ImageRgba8(masked_rgba);
             let mut secret_file = File::open(&secret).expect("Failed to open secret file");
             let mut content = Vec::new();
             secret_file.read_to_end(&mut content).unwrap();
@@ -583,11 +622,7 @@ fn main() {
             let key = generate_bits_fast(final_bits.len(), &password);
             let masked_bits = xor_bits(&final_bits, &key);
 
-            let mut stego_img = match domain {
-                Domain::Lsb => adaptive_embed_lsb(&masked_img, &masked_bits, &password, redundancy, progress),
-                Domain::LsbMatch => adaptive_embed_lsb_match(&masked_img, &masked_bits, &password, redundancy, progress),
-                Domain::Dct => adaptive_embed_lsb_match(&masked_img, &masked_bits, &password, redundancy, progress),
-            };
+            let stego_img = embed_with_optimization(&cover_img, &masked_bits, &password, domain, redundancy, stealth, optimize, progress);
 
             // stego_img already contains the masking transformations, so we can
             // save it directly.

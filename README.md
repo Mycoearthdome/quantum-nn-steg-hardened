@@ -42,7 +42,7 @@ cargo build --release
 ### Embed a secret:
 
 ```bash
-cargo run --release --   embed   --cover bird.jpeg   --secret secret.txt   --output stego.png   --password "your-passphrase"
+cargo run --release --   embed   --cover bird.jpeg   --secret secret.txt   --output stego.png   --password "your-passphrase"   --optimize 3
 ```
 
 ### Extract a secret:
@@ -65,7 +65,8 @@ likelihood that the image contains recoverable hidden data.
 - `--redundancy 3` — set bit redundancy factor (default: 3)
 - `--domain lsb|lsb-match|dct` — select embedding domain
 - `--stealth high|medium|low` — control aggressiveness of classifier masking
- - `--progress` — show progress bar and estimated time
+- `--progress` — show progress bar and estimated time
+- `--optimize N` — try multiple masking variations and keep the best (default: 1)
 
 When `--stealth high` is chosen, additional patch shuffling preserves image statistics while further confusing RS analysis.
 Masking is applied to the cover image prior to embedding so that the embedded
