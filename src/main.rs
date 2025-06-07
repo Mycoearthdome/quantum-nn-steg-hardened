@@ -53,6 +53,10 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         progress: bool,
     },
+    Detect {
+        #[arg(long)]
+        image: String,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -478,6 +482,74 @@ fn mask_image(img: &mut RgbaImage, level: StealthLevel, password: &str) {
     }
 }
 
+fn detect_lsb_randomness(img: &DynamicImage) -> f64 {
+    let bytes = img.to_rgba8().into_raw();
+    let mut counts = [0usize; 2];
+    for b in bytes {
+        counts[(b & 1) as usize] += 1;
+    }
+    let total = (counts[0] + counts[1]) as f64;
+    if total == 0.0 { return 0.0; }
+    let expected = total / 2.0;
+    ((counts[0] as f64 - expected).powi(2) / expected) +
+        ((counts[1] as f64 - expected).powi(2) / expected)
+}
+
+fn detect_lsb_match(img: &DynamicImage) -> f64 {
+    let bytes = img.to_rgba8().into_raw();
+    if bytes.len() < 2 { return 0.0; }
+    let mut diff1 = 0usize;
+    for i in 1..bytes.len() {
+        if bytes[i].abs_diff(bytes[i-1]) == 1 { diff1 += 1; }
+    }
+    diff1 as f64 / (bytes.len() - 1) as f64
+}
+
+fn detect_dct_parity(img: &DynamicImage) -> f64 {
+    use rustdct::DctPlanner;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    if width < 8 || height < 8 { return 0.0; }
+    let mut planner = DctPlanner::new();
+    let dct = planner.plan_dct2(8);
+
+    let mut counts = [0usize; 2];
+    for by in 0..height/8 {
+        for bx in 0..width/8 {
+            let mut block = [[0f32;8];8];
+            for y in 0..8 {
+                for x in 0..8 {
+                    let px = rgba.get_pixel(bx*8 + x, by*8 + y);
+                    block[y as usize][x as usize] = px[0] as f32;
+                }
+            }
+            for row in &mut block { dct.process_dct2(row); }
+            for x in 0..8 {
+                let mut col = [0f32;8];
+                for y in 0..8 { col[y as usize] = block[y as usize][x as usize]; }
+                dct.process_dct2(&mut col);
+                for y in 0..8 { block[y as usize][x as usize] = col[y as usize]; }
+            }
+            let val = block[4][3].round() as i32;
+            counts[(val & 1) as usize] += 1;
+        }
+    }
+    let total = (counts[0] + counts[1]) as f64;
+    if total == 0.0 { return 0.0; }
+    let expected = total / 2.0;
+    ((counts[0] as f64 - expected).powi(2) / expected) +
+        ((counts[1] as f64 - expected).powi(2) / expected)
+}
+
+fn run_adversarial_tests(img: &DynamicImage) {
+    let lsb_chi = detect_lsb_randomness(img);
+    let lsb_match_rate = detect_lsb_match(img);
+    let dct_chi = detect_dct_parity(img);
+    println!("[INFO] LSB chi-square statistic: {:.4}", lsb_chi);
+    println!("[INFO] LSB-match diff rate: {:.4}", lsb_match_rate);
+    println!("[INFO] DCT parity chi-square: {:.4}", dct_chi);
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -539,6 +611,10 @@ fn main() {
             } else {
                 println!("[ERROR] CRC check failed or no payload found.");
             }
+        }
+        Commands::Detect { image } => {
+            let img = image::open(&image).expect("Failed to open image");
+            run_adversarial_tests(&img);
         }
     }
 }

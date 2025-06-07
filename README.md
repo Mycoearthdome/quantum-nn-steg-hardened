@@ -16,11 +16,14 @@ This system includes **five layers** of anti-detection defenses:
 3. **Redundant Adaptive Embedding**  
    Each bit is embedded multiple times (e.g. 3×) and recovered by majority vote.
 
-4. **Transform-Domain Embedding (DCT)**  
+4. **Transform-Domain Embedding (DCT)**
    Optionally embeds payload into mid-band JPEG-DCT coefficients for added stealth.
 
 5. **Classifier-Resistant Statistical Masking**
    RS-safe, patch-based shuffling is applied at high stealth level to preserve global statistics while disrupting local correlations.
+
+6. **Adversarial Detection**
+   Analyze an image for signs it was produced by this tool using any embedding mode.
 
 ---
 
@@ -48,6 +51,11 @@ cargo run --release --   embed   --cover bird.jpeg   --secret secret.txt   --out
 cargo run --release --   extract   --stego stego.png   --output extracted_secret.txt   --password "your-passphrase"
 ```
 
+### Detect a stego image:
+```bash
+cargo run --release --   detect   --image stego.png
+```
+
 ---
 
 ## 🧠 Advanced Options
@@ -70,6 +78,7 @@ bits remain intact during extraction.
 - [x] CLI framework
 - [x] Mid-band DCT embedding
 - [x] RS/Class-safe masking
+- [x] Adversarial detection
 - [ ] Embedded benchmarking suite (entropy, histogram diff, detectability)
 
 ---
