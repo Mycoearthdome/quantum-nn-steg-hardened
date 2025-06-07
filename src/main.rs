@@ -141,6 +141,9 @@ fn add_crc_and_len(bits: &[u8]) -> Vec<u8> {
 fn check_crc_and_len(bits: &[u8]) -> Option<Vec<u8>> {
     let length = bits_to_int(&bits[..32]);
     let crc_expected = bits_to_int(&bits[32..64]);
+    if 64 + length > bits.len() {
+        return None;
+    }
     let data = &bits[64..64 + length];
     let mut hasher = Crc32Hasher::new();
     hasher.update(&bits_to_bytes(data));
