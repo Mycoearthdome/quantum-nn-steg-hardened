@@ -133,60 +133,60 @@ fn bits_to_int(bits: &[u8]) -> usize {
     bits.iter().fold(0, |acc, &b| (acc << 1) | b as usize)
 }
 
-fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let r = r as f32;
-    let g = g as f32;
-    let b = b as f32;
+fn rgb_to_ycbcr(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let r = r as f64;
+    let g = g as f64;
+    let b = b as f64;
     // Coefficients from JPEG File Interchange Format (Version 1.02)
-    let y  = 0.299_f32 * r + 0.587_f32 * g + 0.114_f32 * b;
-    let cb = -0.168736_f32 * r - 0.331264_f32 * g + 0.5_f32 * b + 128.0;
-    let cr = 0.5_f32 * r - 0.418688_f32 * g - 0.081312_f32 * b + 128.0;
+    let y  = 0.299_f64 * r + 0.587_f64 * g + 0.114_f64 * b;
+    let cb = -0.168736_f64 * r - 0.331264_f64 * g + 0.5_f64 * b + 128.0;
+    let cr = 0.5_f64 * r - 0.418688_f64 * g - 0.081312_f64 * b + 128.0;
     (y, cb, cr)
 }
 
-fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32) -> (u8, u8, u8) {
-    let r = (y + 1.402_f32 * (cr - 128.0)).round().clamp(0.0, 255.0);
-    let g = (y - 0.344136_f32 * (cb - 128.0) - 0.714136_f32 * (cr - 128.0))
+fn ycbcr_to_rgb(y: f64, cb: f64, cr: f64) -> (u8, u8, u8) {
+    let r = (y + 1.402_f64 * (cr - 128.0)).round().clamp(0.0, 255.0);
+    let g = (y - 0.344136_f64 * (cb - 128.0) - 0.714136_f64 * (cr - 128.0))
         .round()
         .clamp(0.0, 255.0);
-    let b = (y + 1.772_f32 * (cb - 128.0)).round().clamp(0.0, 255.0);
+    let b = (y + 1.772_f64 * (cb - 128.0)).round().clamp(0.0, 255.0);
     (r as u8, g as u8, b as u8)
 }
 
-fn dct_2d(block: &[[f32;8];8]) -> [[f32;8];8] {
-    let mut out = [[0f32;8];8];
+fn dct_2d(block: &[[f64;8];8]) -> [[f64;8];8] {
+    let mut out = [[0f64;8];8];
     for v in 0..8 {
         for u in 0..8 {
-            let mut sum = 0f32;
+            let mut sum = 0f64;
             for y in 0..8 {
                 for x in 0..8 {
                     sum += block[y][x]
-                        * ((std::f32::consts::PI * (2*x + 1) as f32 * u as f32) / 16.0).cos()
-                        * ((std::f32::consts::PI * (2*y + 1) as f32 * v as f32) / 16.0).cos();
+                        * ((std::f64::consts::PI * (2*x + 1) as f64 * u as f64) / 16.0).cos()
+                        * ((std::f64::consts::PI * (2*y + 1) as f64 * v as f64) / 16.0).cos();
                 }
             }
-            let cu = if u == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
-            let cv = if v == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+            let cu = if u == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
+            let cv = if v == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
             out[v][u] = 0.25 * cu * cv * sum;
         }
     }
     out
 }
 
-fn idct_2d(block: &[[f32;8];8]) -> [[f32;8];8] {
-    let mut out = [[0f32;8];8];
+fn idct_2d(block: &[[f64;8];8]) -> [[f64;8];8] {
+    let mut out = [[0f64;8];8];
     for y in 0..8 {
         for x in 0..8 {
-            let mut sum = 0f32;
+            let mut sum = 0f64;
             for v in 0..8 {
                 for u in 0..8 {
-                    let cu = if u == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
-                    let cv = if v == 0 { 1.0 / 2f32.sqrt() } else { 1.0 };
+                    let cu = if u == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
+                    let cv = if v == 0 { 1.0 / 2f64.sqrt() } else { 1.0 };
                     sum += cu
                         * cv
                         * block[v][u]
-                        * ((std::f32::consts::PI * (2*x + 1) as f32 * u as f32) / 16.0).cos()
-                        * ((std::f32::consts::PI * (2*y + 1) as f32 * v as f32) / 16.0).cos();
+                        * ((std::f64::consts::PI * (2*x + 1) as f64 * u as f64) / 16.0).cos()
+                        * ((std::f64::consts::PI * (2*y + 1) as f64 * v as f64) / 16.0).cos();
                 }
             }
             out[y][x] = 0.25 * sum;
@@ -371,9 +371,9 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
 fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
     let mut rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let mut y_plane = vec![0f32; (width * height) as usize];
-    let mut cb_plane = vec![0f32; (width * height) as usize];
-    let mut cr_plane = vec![0f32; (width * height) as usize];
+    let mut y_plane = vec![0f64; (width * height) as usize];
+    let mut cb_plane = vec![0f64; (width * height) as usize];
+    let mut cr_plane = vec![0f64; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
             let p = rgba.get_pixel(x, y);
@@ -408,7 +408,7 @@ fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundanc
             let bx = (idx % blocks_w) as usize;
             let by = (idx / blocks_w) as usize;
 
-            let mut block = [[0f32;8];8];
+            let mut block = [[0f64;8];8];
             for y in 0..8 {
                 for x in 0..8 {
                     let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
@@ -429,15 +429,33 @@ fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundanc
                 } else {
                     val += if want == 1 { -1 } else { 1 };
                 }
-                // Strengthen change to survive rounding
                 if (val.abs() & 1) != want { val += if val >=0 {2} else {-2}; }
             }
-            coeff[4][3] = val as f32;
-            let block = idct_2d(&coeff);
+            coeff[4][3] = val as f64;
+            let mut block = idct_2d(&coeff);
             for y in 0..8 {
                 for x in 0..8 {
                     let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
                     y_plane[idx_px] = block[y][x].round().clamp(0.0, 255.0);
+                }
+            }
+            let mut verify = [[0f64;8];8];
+            for y in 0..8 {
+                for x in 0..8 {
+                    let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
+                    verify[y][x] = y_plane[idx_px];
+                }
+            }
+            let check = dct_2d(&verify)[4][3].round() as i32;
+            if (check.abs() & 1) != want {
+                val += if val >= 0 { if want == 1 { 2 } else { -2 } } else { if want == 1 { -2 } else { 2 } };
+                coeff[4][3] = val as f64;
+                block = idct_2d(&coeff);
+                for y in 0..8 {
+                    for x in 0..8 {
+                        let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
+                        y_plane[idx_px] = block[y][x].round().clamp(0.0, 255.0);
+                    }
                 }
             }
         }
@@ -459,7 +477,7 @@ fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundanc
 fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    let mut y_plane = vec![0f32; (width * height) as usize];
+    let mut y_plane = vec![0f64; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
             let p = rgba.get_pixel(x, y);
@@ -492,7 +510,7 @@ fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, red
             let bx = (idx % blocks_w) as usize;
             let by = (idx / blocks_w) as usize;
 
-            let mut block = [[0f32;8];8];
+            let mut block = [[0f64;8];8];
             for y in 0..8 {
                 for x in 0..8 {
                     let idx_px = (by*8 + y) * width as usize + (bx*8 + x);
@@ -608,7 +626,7 @@ fn detect_dct_parity(img: &DynamicImage) -> f64 {
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
     if width < 8 || height < 8 { return 0.0; }
-    let mut y_plane = vec![0f32; (width * height) as usize];
+    let mut y_plane = vec![0f64; (width * height) as usize];
     for y in 0..height {
         for x in 0..width {
             let p = rgba.get_pixel(x, y);
@@ -620,7 +638,7 @@ fn detect_dct_parity(img: &DynamicImage) -> f64 {
     let mut counts = [0usize; 2];
     for by in 0..height/8 {
         for bx in 0..width/8 {
-            let mut block = [[0f32;8];8];
+            let mut block = [[0f64;8];8];
             for y in 0..8 {
                 for x in 0..8 {
                     let idx_px = ((by*8 + y) * width + (bx*8 + x)) as usize;
