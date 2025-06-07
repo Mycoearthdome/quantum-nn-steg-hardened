@@ -79,7 +79,7 @@ cargo run --release --   extract   --stego stego.png   --output extracted_secret
 
 ## 📜 License
 
-Apache 2.0 — your choice.
+Apache 2.0
 
 ---
 
