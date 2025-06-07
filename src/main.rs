@@ -139,7 +139,7 @@ fn compute_capacity(img: &DynamicImage, domain: Domain, redundancy: usize) -> us
         Domain::LsbMatch => img.to_rgba8().as_flat_samples().samples.len() / redundancy,
         Domain::Dct => {
             let (w, h) = img.dimensions();
-            ((w / 8) * (h / 8)) as usize
+            ((w / 8) * (h / 8)) as usize / redundancy
         }
     }
 }
@@ -304,6 +304,135 @@ fn adaptive_extract_lsb(img: &DynamicImage, bits_len: usize, password: &str, red
 
     if let Some(bar) = pb { bar.finish_with_message("Extraction complete"); }
     bits
+}
+
+fn adaptive_embed_dct(img: &DynamicImage, bits: &[u8], password: &str, redundancy: usize, show_progress: bool) -> RgbaImage {
+    use rustdct::DctPlanner;
+    let mut rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let blocks_w = (width / 8) as usize;
+    let blocks_h = (height / 8) as usize;
+    let mut planner = DctPlanner::new();
+    let dct2 = planner.plan_dct2(8);
+    let idct = planner.plan_dct3(8);
+
+    let capacity = blocks_w * blocks_h;
+    let mut indices: Vec<usize> = (0..capacity).collect();
+    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
+    indices.shuffle(&mut rng);
+
+    let pb = if show_progress {
+        let bar = ProgressBar::new(bits.len() as u64);
+        bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
+        Some(bar)
+    } else { None };
+
+    let mut pos_idx = 0;
+    for &bit in bits {
+        for _ in 0..redundancy {
+            if pos_idx >= indices.len() { break; }
+            let idx = indices[pos_idx];
+            pos_idx += 1;
+            let bx = (idx % blocks_w) as u32;
+            let by = (idx / blocks_w) as u32;
+
+            let mut block = [[0f32;8];8];
+            for y in 0..8 {
+                for x in 0..8 {
+                    block[y][x] = rgba.get_pixel(bx*8 + x as u32, by*8 + y as u32)[0] as f32;
+                }
+            }
+            for row in &mut block { dct2.process_dct2(row); }
+            for x in 0..8 {
+                let mut col = [0f32;8];
+                for y in 0..8 { col[y] = block[y][x]; }
+                dct2.process_dct2(&mut col);
+                for y in 0..8 { block[y][x] = col[y]; }
+            }
+
+            let mut val = block[4][3].round() as i32;
+            let want = bit as i32;
+            let parity = (val.abs() & 1) as i32;
+            if parity != want {
+                if val >= 0 { if want == 1 { val += 1; } else { val -= 1; } }
+                else { if want == 1 { val -= 1; } else { val += 1; } }
+            }
+            block[4][3] = val as f32;
+
+            for x in 0..8 {
+                let mut col = [0f32;8];
+                for y in 0..8 { col[y] = block[y][x]; }
+                idct.process_dct3(&mut col);
+                for y in 0..8 { block[y][x] = col[y]; }
+            }
+            for row in &mut block { idct.process_dct3(row); }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let val = block[y][x].round().clamp(0.0, 255.0) as u8;
+                    let p = rgba.get_pixel_mut(bx*8 + x as u32, by*8 + y as u32);
+                    p.0[0] = val;
+                }
+            }
+        }
+        if let Some(ref bar) = pb { bar.inc(1); }
+    }
+    if let Some(bar) = pb { bar.finish_with_message("Embedding complete"); }
+    rgba
+}
+
+fn adaptive_extract_dct(img: &DynamicImage, bits_len: usize, password: &str, redundancy: usize, show_progress: bool) -> Vec<u8> {
+    use rustdct::DctPlanner;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let blocks_w = (width / 8) as usize;
+    let blocks_h = (height / 8) as usize;
+    let mut planner = DctPlanner::new();
+    let dct2 = planner.plan_dct2(8);
+
+    let capacity = blocks_w * blocks_h;
+    let mut indices: Vec<usize> = (0..capacity).collect();
+    let mut rng = StdRng::seed_from_u64(u64::from_le_bytes(Sha256::digest(password.as_bytes())[..8].try_into().unwrap()));
+    indices.shuffle(&mut rng);
+
+    let pb = if show_progress {
+        let bar = ProgressBar::new(bits_len as u64);
+        bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})").unwrap());
+        Some(bar)
+    } else { None };
+
+    let mut pos_idx = 0;
+    let mut out = Vec::with_capacity(bits_len);
+    for _ in 0..bits_len {
+        let mut votes = [0usize;2];
+        for _ in 0..redundancy {
+            if pos_idx >= indices.len() { break; }
+            let idx = indices[pos_idx];
+            pos_idx += 1;
+            let bx = (idx % blocks_w) as u32;
+            let by = (idx / blocks_w) as u32;
+
+            let mut block = [[0f32;8];8];
+            for y in 0..8 {
+                for x in 0..8 {
+                    block[y][x] = rgba.get_pixel(bx*8 + x as u32, by*8 + y as u32)[0] as f32;
+                }
+            }
+            for row in &mut block { dct2.process_dct2(row); }
+            for x in 0..8 {
+                let mut col = [0f32;8];
+                for y in 0..8 { col[y] = block[y][x]; }
+                dct2.process_dct2(&mut col);
+                for y in 0..8 { block[y][x] = col[y]; }
+            }
+            let val = block[4][3].round() as i32;
+            let bit = (val.abs() & 1) as usize;
+            votes[bit] += 1;
+        }
+        out.push(if votes[1] > votes[0] { 1 } else { 0 });
+        if let Some(ref bar) = pb { bar.inc(1); }
+    }
+    if let Some(bar) = pb { bar.finish_with_message("Extraction complete"); }
+    out
 }
 
 
@@ -475,7 +604,7 @@ fn embed_with_optimization(
         let stego = match domain {
             Domain::Lsb => adaptive_embed_lsb(&masked, bits, password, redundancy, progress && attempts==1),
             Domain::LsbMatch => adaptive_embed_lsb_match(&masked, bits, password, redundancy, progress && attempts==1),
-            Domain::Dct => adaptive_embed_lsb_match(&masked, bits, password, redundancy, progress && attempts==1),
+            Domain::Dct => adaptive_embed_dct(&masked, bits, password, redundancy, progress && attempts==1),
         };
         let score = run_adversarial_tests(&DynamicImage::ImageRgba8(stego.clone()));
         if score < best_score {
@@ -532,7 +661,7 @@ fn main() {
             let extracted_bits = match domain {
                 Domain::Lsb => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
                 Domain::LsbMatch => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
-                Domain::Dct => adaptive_extract_lsb(&stego_loaded, bits_len, &password, redundancy, progress),
+                Domain::Dct => adaptive_extract_dct(&stego_loaded, bits_len, &password, redundancy, progress),
             };
             let key = generate_bits_fast(bits_len, &password);
             let unmasked_bits = xor_bits(&extracted_bits[..bits_len], &key);
