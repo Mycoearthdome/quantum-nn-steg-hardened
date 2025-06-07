@@ -193,23 +193,39 @@ fn adaptive_embed_lsb(img: &DynamicImage, bits: &[u8], password: &str, redundanc
 
     let mut positions: Vec<usize> = (0..capacity/4).map(|p| p*4).collect();
     positions.shuffle(&mut rng);
+
+    // Precompute which indices will be used for embedding so we avoid
+    // swapping with them and corrupting future bits.
+    let mut reserved = vec![false; capacity];
+    for pos in positions.iter().take(bits.len()) {
+        for i in 0..redundancy {
+            reserved[(pos + i) % capacity] = true;
+        }
+    }
+
+    let mut used = vec![false; capacity];
     while bit_index < bits.len() && bit_index < capacity / (2 * redundancy) {
         let pos = positions[bit_index % positions.len()];
         for i in 0..redundancy {
             let idx1 = (pos + i) % capacity;
+            used[idx1] = true;
             let orig = flat[idx1];
             let new_val = (orig & 0xFE) | bits[bit_index];
             if orig == new_val { continue; }
 
             let mut idx2 = (idx1 + 1) % capacity;
             let mut steps = 0;
-            while steps < capacity && flat[idx2] != new_val {
+            while steps < capacity {
+                if !reserved[idx2] && !used[idx2] && flat[idx2] == new_val {
+                    break;
+                }
                 idx2 = (idx2 + 1) % capacity;
                 steps += 1;
             }
             if steps < capacity && idx2 != idx1 {
                 flat[idx1] = new_val;
                 flat[idx2] = orig;
+                used[idx2] = true;
             } else {
                 flat[idx1] = new_val;
             }
